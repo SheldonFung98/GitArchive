@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from os.path import exists, join, getsize
 from requests.auth import HTTPBasicAuth
 from typing import Any, Sequence
@@ -105,34 +106,30 @@ class Transfer(Thread):
 				print("Retry transfer {}.".format(self.url))
 				continue
 
-class BatchThreads:
-	def __init__(self, threads):
+class DynamicBatchExecute:
+	def __init__(self, threads, max_threads=8):
 		self.threads = threads
+		self.max_threads = max_threads
+		self.executor = None
+		self.futures = []
 
-	def start(self):
-		for thread in self.threads:
-			thread.start()
+	def start(self, non_blocking=False):
+		self.executor = ThreadPoolExecutor(max_workers=self.max_threads)
+		self.futures = {self.executor.submit(thread.run): thread for thread in self.threads}
+		if not non_blocking:
+			self.wait()
 
 	def wait(self):
-		for thread in self.threads:
-			thread.join()
-	
+		for future in as_completed(self.futures):
+			thread = self.futures[future]
+			try:
+				future.result()
+			except Exception as exc:
+				print(f'{thread} generated an exception: {exc}')
+		self.executor.shutdown()
+
 	def get_progress(self):
 		return sum([thread.get_progress() for thread in self.threads]) / len(self.threads)
-
-class BatchExecute:
-
-	def __init__(self, threads, max_threads=8):
-		self.batched_threads = [BatchThreads(threads[i:i + max_threads]) for i in range(0, len(threads), max_threads)]
-
-	def __iter__(self):
-		for batch in self.batched_threads:
-			yield batch
-	
-	def start(self):
-		for batch in self.batched_threads:
-			batch.start()
-			batch.wait()
 
 class Release:
 	FILE_SIZE_FORMATS = ["B", "KB", "MB", "GB"]
@@ -234,17 +231,28 @@ class GitArchive:
 		Accept="application/vnd.github.v3.raw",
 	)
 	DOWNLOAD_FOLDER_NAME = "downloads"
+	TOKEN_FN = "github.tk"
 
-	def __init__(self, repo_path, root, token=None, max_threads=8):
+	def __init__(self, repo_path, root, token=None, max_threads=8, token_autosave=True):
 		self.root = root
 		self.repo_path = repo_path
 		self.headers = deepcopy(GitArchive.DEFAULT_HEADER)
-		self.token = token
-		if token is not None:
-			self.headers["Authorization"] = "token {}".format(token)
+		self.token = self.token_io(token)
+		if self.token:
+			self.headers["Authorization"] = "token {}".format(self.token)
 		self.max_threads = max_threads
 		self.url = "{}/repos/{}/releases".format(GitArchive.GITHUB_API, self.repo_path)
 		self.releases_df = self._getReleases()
+	
+	def token_io(self, token):
+		if token is None:
+			if exists(GitArchive.TOKEN_FN):
+				with open(GitArchive.TOKEN_FN, "r") as tk_file:
+					token = tk_file.read()
+		else:
+			with open(GitArchive.TOKEN_FN, "w") as tk_file:
+				tk_file.write(token)
+		return token
 
 	def _getReleases(self):
 		req = requests.get(self.url, headers=self.headers)
@@ -286,10 +294,11 @@ class GitArchive:
 			_type_: _description_
 		"""
 		if isinstance(index, int):
-			download_df = self.releases_df.iloc[index]
+			download_df = self.releases_df.iloc[[index]]
 		elif isinstance(index, str):
-			download_df = self.releases_df[self.releases_df["tag_name"] == index]
+			download_df = self.releases_df[self.releases_df["tag_name"] == index] if index else self.releases_df
 		elif isinstance(index, (list, tuple)):
+			index = list(index)
 			if isinstance(index[0], int):
 				download_df = self.releases_df.iloc[index]
 			elif isinstance(index[0], str):
@@ -300,11 +309,13 @@ class GitArchive:
 			download_df = self.releases_df
 		else:
 			raise ValueError("index should be int, str, list or tuple.")
+		if download_df.empty:
+			print("Nothing to download.")
 		threads = []
 
 		releases = [Release(asset, self.root, self.token, max_threads=self.max_threads) for ind, asset in download_df.iterrows()]
 		dl_threads = [d for r in releases for d in r.download(non_blocking=True)]
-		batch_exe = BatchExecute(dl_threads, self.max_threads)
+		batch_exe = DynamicBatchExecute(dl_threads, self.max_threads)
 		if non_blocking:
 			return batch_exe
 		else:
@@ -333,7 +344,7 @@ class GitArchive:
 		headers["Content-Type"] = "application/octet-stream"
 		params = dict(headers=headers, stream=True)
 		ul_threads = [Transfer(upload_url, file, params, ttype="upload") for file in files]
-		batch_exe = BatchExecute(ul_threads, self.max_threads)
+		batch_exe = DynamicBatchExecute(ul_threads, self.max_threads)
 		if non_blocking:
 			return batch_exe
 		else:
