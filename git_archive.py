@@ -1,8 +1,8 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Sequence, Iterable
 from os.path import exists, join, getsize
 from requests.auth import HTTPBasicAuth
-from typing import Any, Sequence
-from os import listdir, mkdir
+from os import listdir, mkdir, remove
 from threading import Thread
 from copy import deepcopy
 from tqdm import tqdm
@@ -10,6 +10,7 @@ import pandas as pd
 import argparse
 import requests
 import zipfile
+import hashlib
 import json
 import sys
 
@@ -25,18 +26,30 @@ class RepoCredentialError(Exception):
 		super().__init__(self.message)
 
 
-class FileChunk:
-	def __init__(self, file_path, chunk_size=4096):
-		self.file_path = file_path
+class File:
+	def __init__(self, fp, chunk_size=4096):
+		self.fp = fp
 		self.chunk_size = chunk_size
-		self.file_size = getsize(file_path)
 		self.progress = 0
 	
+	def path(self):
+		return self.fp
+
+	def decompress(self, delete=True):
+		if self.fp.endswith(".zip"):
+			print("Decompressing {}".format(self.fp), end="...", flush=True)
+			extract_path = join(*self.fp.split("/")[:-1])
+			with zipfile.ZipFile(self.fp, 'r') as zip_ref:
+				zip_ref.extractall(extract_path)
+			if delete:
+				remove(self.fp)
+			print("Done.")
+				
 	def __iter__(self):
 		file_size = 0
-		total_length = getsize(self.file_path)
+		total_length = getsize(self.fp)
 		t = tqdm(total=self.file_size, unit='B', unit_scale=True)
-		with open(self.file_path, "rb") as file:
+		with open(self.fp, "rb") as file:
 			while chunk := file.read(self.chunk_size):
 				file_size += len(chunk)
 				t.update(len(chunk))
@@ -44,8 +57,41 @@ class FileChunk:
 				yield chunk
 		t.close()
 	
+	def write(self, idata: Iterable[bytes], total_length: int):
+		length, total_length = 0, int(total_length)
+		t = tqdm(total=total_length, unit='B', unit_scale=True)
+		with open(self.fp, "wb") as file:
+			for d in idata:
+				length += len(d)
+				t.update(len(d))
+				file.write(d)
+				self.progress = length / total_length
+		t.close()
+	
+	def md5(self):
+		if not exists(self.fp):
+			raise FileNotFoundError(f"File not found: {self.fp}")
+		md5_hash = hashlib.md5()
+		with open(self.fp, "rb") as f:
+			# Read and update hash in chunks of 4K
+			for byte_block in iter(lambda: f.read(self.chunk_size), b""):
+				md5_hash.update(byte_block)
+		return md5_hash.hexdigest()
+
+	def size(self, unit="MB", rounding=2):
+		assert unit in ["B", "KB", "MB", "GB"], "unit must be one of ['B', 'KB', 'MB', 'GB']"
+		if unit == "B":
+			denominator = 1
+		elif unit == "KB":
+			denominator = 1024
+		elif unit == "MB":
+			denominator = 1024 ** 2
+		elif unit == "GB":
+			denominator = 1024 ** 3
+		return round(len(self) / denominator, rounding)
+
 	def __len__(self):
-		return self.file_size
+		return getsize(self.fp)
 
 class Transfer(Thread):
 	TRANSFER_TYPES = ["download", "upload"]
@@ -53,10 +99,8 @@ class Transfer(Thread):
 	def __init__(self, url, file_path, params, ttype="download", chunk_size=4096):
 		assert ttype in Transfer.TRANSFER_TYPES, "type should be one of {}".format(Transfer.TRANSFER_TYPES)
 		self.trasfer = self._download if ttype == "download" else self._upload
-		if ttype == "upload":
-			self.file = FileChunk(file_path, chunk_size)
+		self.file = File(file_path, chunk_size)
 		self.url = url
-		self.file_path = file_path
 		self.params = params
 		self.chunk_size = chunk_size
 		self.progress = 0
@@ -64,22 +108,23 @@ class Transfer(Thread):
 		super().__init__()
 	
 	def _download(self):
-		file_name = self.file_path.split("/")[-1]
+		file_name = self.file.path().split("/")[-1]
 		response = requests.get(self.url, **self.params)
 		total_length = response.headers.get('content-length')
-		with open(self.file_path, "wb") as file:
-			dl_length, total_length = 0, int(total_length)
-			t = tqdm(total=total_length, unit='B', unit_scale=True)
-			for data in response.iter_content(chunk_size=self.chunk_size):
-				dl_length += len(data)
-				t.update(len(data))
-				file.write(data)
-				self.progress = dl_length / total_length
-			t.close()
+		self.file.write(response.iter_content(chunk_size=self.chunk_size), total_length)
+		# with open(self.fp, "wb") as file:
+		# 	dl_length, total_length = 0, int(total_length)
+		# 	t = tqdm(total=total_length, unit='B', unit_scale=True)
+		# 	for data in response.iter_content(chunk_size=self.chunk_size):
+		# 		dl_length += len(data)
+		# 		t.update(len(data))
+		# 		file.write(data)
+		# 		self.progress = dl_length / total_length
+		# 	t.close()
 		self.done = True
 
 	def _upload(self):
-		file_name = self.file_path.split("/")[-1]
+		file_name = self.file.path().split("/")[-1]
 		params = deepcopy(self.params)
 		params["data"] = self.file
 		url = f"{self.url}?name={file_name}"
@@ -88,14 +133,11 @@ class Transfer(Thread):
 			raise Exception(f"Failed to upload {file_name}: {upload_response.json()}")
 		self.done = True
 	
-	def get_filepath(self):
-		return self.file_path
+	def get_file(self):
+		return self.file
 	
 	def get_progress(self):
-		if ttype == "upload":
-			return self.file.progress
-		elif ttype == "download":
-			return self.progress
+		return self.file.progress
 
 	def run(self):
 		while not self.done:
@@ -320,7 +362,7 @@ class GitArchive:
 			return batch_exe
 		else:
 			batch_exe.start()
-			return [t.get_filepath() for t in dl_threads] 
+			return [t.get_file() for t in dl_threads] 
 
 	def new_realease(self, name: str, tag: str, desc: str, files: Sequence[str], non_blocking=False):
 		"""
@@ -349,7 +391,7 @@ class GitArchive:
 			return batch_exe
 		else:
 			batch_exe.start()
-			return [t.get_filepath() for t in ul_threads] 
+			return [t.get_file() for t in ul_threads] 
 
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser(description="Git Archives Command Line Management Tool.")
@@ -371,9 +413,7 @@ if __name__ == "__main__":
 	release = ga[1]
 	print(release)
 	if args.all:
-		download_paths = ga.download()
-		print(download_paths)
+		downloaded_files = ga.download()
 	if args.new:
 		files = [join(args.folder, f) for f in listdir(args.folder)]
-		upload_paths = ga.new_realease(args.name, args.tag, args.desc, files)
-		print(upload_paths)
+		uploaded_files = ga.new_realease(args.name, args.tag, args.desc, files)
