@@ -92,6 +92,9 @@ class File:
 
 	def __len__(self):
 		return getsize(self.fp)
+	
+	def exists(self):
+		return exists(self.fp)
 
 class Transfer(Thread):
 	TRANSFER_TYPES = ["download", "upload"]
@@ -110,17 +113,9 @@ class Transfer(Thread):
 	def _download(self):
 		file_name = self.file.path().split("/")[-1]
 		response = requests.get(self.url, **self.params)
-		total_length = response.headers.get('content-length')
-		self.file.write(response.iter_content(chunk_size=self.chunk_size), total_length)
-		# with open(self.fp, "wb") as file:
-		# 	dl_length, total_length = 0, int(total_length)
-		# 	t = tqdm(total=total_length, unit='B', unit_scale=True)
-		# 	for data in response.iter_content(chunk_size=self.chunk_size):
-		# 		dl_length += len(data)
-		# 		t.update(len(data))
-		# 		file.write(data)
-		# 		self.progress = dl_length / total_length
-		# 	t.close()
+		total_length = int(response.headers.get('content-length'))
+		if not (self.file.exists() and total_length == len(self.file)):
+			self.file.write(response.iter_content(chunk_size=self.chunk_size), total_length)
 		self.done = True
 
 	def _upload(self):
@@ -237,7 +232,6 @@ class Release:
 			download_url = asset["url"]
 			file_name = asset["name"]
 			file_path = join(self.root, file_name)
-			if exists(file_path): continue # Do not redownload file.
 			download_threads.append(Transfer(download_url, file_path, self.download_params))
 		return download_threads
 
