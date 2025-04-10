@@ -47,13 +47,13 @@ class File:
 				
 	def __iter__(self):
 		file_size = 0
-		total_length = getsize(self.fp)
-		t = tqdm(total=self.file_size, unit='B', unit_scale=True)
+		total_length = len(self)
+		t = tqdm(total=total_length, unit='B', unit_scale=True)
 		with open(self.fp, "rb") as file:
 			while chunk := file.read(self.chunk_size):
 				file_size += len(chunk)
 				t.update(len(chunk))
-				self.progress = file_size / self.file_size
+				self.progress = file_size / total_length
 				yield chunk
 		t.close()
 	
@@ -149,6 +149,9 @@ class DynamicBatchExecute:
 		self.max_threads = max_threads
 		self.executor = None
 		self.futures = []
+
+	def get_files(self):
+		return [t.get_file() for t in self.threads] 
 
 	def start(self, non_blocking=False):
 		self.executor = ThreadPoolExecutor(max_workers=self.max_threads)
@@ -263,30 +266,33 @@ class Release:
 
 class GitArchive:
 	GITHUB_API = "https://api.github.com"
-	DEFAULT_HEADER = dict(
-		Accept="application/vnd.github.v3.raw",
-	)
+	DEFAULT_HEADER = {
+		"Accept": "application/vnd.github+json",
+		"X-GitHub-Api-Version": "2022-11-28",
+	}
 	DOWNLOAD_FOLDER_NAME = "downloads"
 	TOKEN_FN = "github.tk"
 
-	def __init__(self, repo_path, root, token=None, max_threads=8, token_autosave=True):
+	def __init__(self, repo_path, root, token=None, max_threads=8, token_autosave=True, download_folder=None):
 		self.root = root
+		self.download_folder = GitArchive.DOWNLOAD_FOLDER_NAME if download_folder is None else download_folder
+		self.token_fn = join(self.root, GitArchive.TOKEN_FN)
 		self.repo_path = repo_path
 		self.headers = deepcopy(GitArchive.DEFAULT_HEADER)
 		self.token = self.token_io(token)
 		if self.token:
-			self.headers["Authorization"] = "token {}".format(self.token)
+			self.headers["Authorization"] = "Bearer {}".format(self.token)
 		self.max_threads = max_threads
 		self.url = "{}/repos/{}/releases".format(GitArchive.GITHUB_API, self.repo_path)
 		self.releases_df = self._getReleases()
 	
 	def token_io(self, token):
 		if token is None:
-			if exists(GitArchive.TOKEN_FN):
-				with open(GitArchive.TOKEN_FN, "r") as tk_file:
+			if exists(self.token_fn):
+				with open(self.token_fn, "r") as tk_file:
 					token = tk_file.read()
 		else:
-			with open(GitArchive.TOKEN_FN, "w") as tk_file:
+			with open(self.token_fn, "w") as tk_file:
 				tk_file.write(token)
 		return token
 
@@ -313,7 +319,7 @@ class GitArchive:
 		return len(self.releases_df)
 
 	def __getitem__(self, index: int):
-		return Release(self.releases_df.iloc[index], self.root, self.token)
+		return Release(self.releases_df.iloc[index], join(self.root, self.download_folder), self.token)
 
 	def download(self, index: Sequence[str] | Sequence[int] | str | int | None = None, non_blocking=False):
 		"""Download releases.
@@ -349,7 +355,7 @@ class GitArchive:
 			print("Nothing to download.")
 		threads = []
 
-		releases = [Release(asset, self.root, self.token, max_threads=self.max_threads) for ind, asset in download_df.iterrows()]
+		releases = [Release(asset, join(self.root, self.download_folder), self.token, max_threads=self.max_threads) for ind, asset in download_df.iterrows()]
 		dl_threads = [d for r in releases for d in r.download(non_blocking=True)]
 		batch_exe = DynamicBatchExecute(dl_threads, self.max_threads)
 		if non_blocking:
