@@ -303,6 +303,8 @@ class GitArchive:
 		elif req.status_code == 401:
 			raise RepoCredentialError(self.repo_path)
 		releases_df = pd.DataFrame(json.loads(req.content.decode("utf-8")))
+		if releases_df.empty:
+			return releases_df
 		releases_df['author'] = releases_df['author'].apply(lambda x: x['login'])
 		return releases_df
 	
