@@ -12,7 +12,6 @@ import requests
 import zipfile
 import hashlib
 import json
-import sys
 
 
 class RepoNotFoundError(Exception):
@@ -279,20 +278,21 @@ class GitArchive:
 		self.token_fn = join(self.root, GitArchive.TOKEN_FN)
 		self.repo_path = repo_path
 		self.headers = deepcopy(GitArchive.DEFAULT_HEADER)
-		self.token = self.token_io(token)
+		self.token = token if token else self.token_io()
 		if self.token:
 			self.headers["Authorization"] = "Bearer {}".format(self.token)
 		self.max_threads = max_threads
 		self.url = "{}/repos/{}/releases".format(GitArchive.GITHUB_API, self.repo_path)
 		self.releases_df = self._getReleases()
 	
-	def token_io(self, token):
-		if token is None:
-			if exists(self.token_fn):
-				with open(self.token_fn, "r") as tk_file:
-					token = tk_file.read()
+	def token_io(self):
+		token_fn = join(self.root, GitArchive.TOKEN_FN)
+		if exists(token_fn):
+			with open(token_fn, "r") as tk_file:
+				token = tk_file.read()
 		else:
-			with open(self.token_fn, "w") as tk_file:
+			token = str(input("Please provide github token:"))
+			with open(token_fn, "w") as tk_file:
 				tk_file.write(token)
 		return token
 
@@ -366,7 +366,7 @@ class GitArchive:
 			batch_exe.start()
 			return [t.get_file() for t in dl_threads] 
 
-	def new_realease(self, name: str, tag: str, desc: str, files: Sequence[str], non_blocking=False):
+	def new_release(self, name: str, tag: str, desc: str, files: Sequence[str], non_blocking=False):
 		"""
 		Create a new release and upload files to it.
 		Args:
@@ -418,4 +418,4 @@ if __name__ == "__main__":
 		downloaded_files = ga.download()
 	if args.new:
 		files = [join(args.folder, f) for f in listdir(args.folder)]
-		uploaded_files = ga.new_realease(args.name, args.tag, args.desc, files)
+		uploaded_files = ga.new_release(args.name, args.tag, args.desc, files)
