@@ -111,7 +111,7 @@ class Transfer(Thread):
 	
 	def _download(self):
 		file_name = self.file.path().split("/")[-1]
-		response = requests.get(self.url, **self.params)
+		response = requests.get(self.url, **self.params, timeout=5) # 5-second timeout
 		total_length = int(response.headers.get('content-length'))
 		if not (self.file.exists() and total_length == len(self.file)):
 			self.file.write(response.iter_content(chunk_size=self.chunk_size), total_length)
@@ -122,7 +122,7 @@ class Transfer(Thread):
 		params = deepcopy(self.params)
 		params["data"] = self.file
 		url = f"{self.url}?name={file_name}"
-		upload_response = requests.post(url, **params)
+		upload_response = requests.post(url, **params, timeout=5)  # 5-second timeout
 		if upload_response.status_code not in [200, 201]:
 			raise Exception(f"Failed to upload {file_name}: {upload_response.json()}")
 		self.done = True
@@ -319,9 +319,24 @@ class GitArchive:
 	
 	def __len__(self):
 		return len(self.releases_df)
-
-	def __getitem__(self, index: int):
+	
+	def release_by_tag(self, tag: str):
+		if tag not in self.releases_df["tag_name"].values:
+			raise ValueError(f"Tag {tag} not found in releases.")
+		return Release(self.releases_df[self.releases_df["tag_name"] == tag].iloc[0], join(self.root, self.download_folder), self.token)
+	
+	def release_by_index(self, index: int):
+		if index < 0 or index >= len(self.releases_df):
+			raise IndexError("Index out of range.")
 		return Release(self.releases_df.iloc[index], join(self.root, self.download_folder), self.token)
+
+	def __getitem__(self, index: int | str):
+		if isinstance(index, int):
+			return self.release_by_index(index)
+		elif isinstance(index, str):
+			return self.release_by_tag(index)
+		else:
+			raise ValueError("index should be int or str.")
 
 	def download(self, index: Sequence[str] | Sequence[int] | str | int | None = None, non_blocking=False):
 		"""Download releases.
