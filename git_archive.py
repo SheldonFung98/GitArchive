@@ -196,10 +196,12 @@ class Release:
 		self.body               = info["body"]
 		self.root               = root
 		self.max_threads		= max_threads
+		self.header				= deepcopy(GitArchive.DEFAULT_HEADER)
 
-		self.assets_df["size"] = self.assets_df["size"].apply(
-			lambda x: "{} {}".format(self._format_size(x), self.file_size_format)
-		)
+		if "size" in self.assets_df.columns:
+			self.assets_df["size"] = self.assets_df["size"].apply(
+				lambda x: "{} {}".format(self._format_size(x), self.file_size_format)
+			)
 
 		self.download_params = dict(
 			allow_redirects=True, 
@@ -209,6 +211,7 @@ class Release:
 		self.progress = 0
 		if token is not None:
 			self.download_params["auth"] = HTTPBasicAuth("", token)
+			self.header["Authorization"] = f"Bearer {token}"
 	
 	def get_downloaded_paths(self):
 		return self.downloaded_paths
@@ -237,7 +240,7 @@ class Release:
 			download_threads.append(Transfer(download_url, file_path, self.download_params))
 		return download_threads
 
-	def download(self, index=None, non_blocking=False):
+	def download(self, index: str | int | None = None, non_blocking=False):
 		if not exists(self.root):
 			mkdir(self.root)
 		if index is None:
@@ -263,6 +266,27 @@ class Release:
 			batch_execute(dl_threads, self.max_threads)
 		return [thread.get_filepath() for thread in dl_threads]
 
+	def update(self, name: str, tag: str, desc: str, files: Sequence[str]=[]):
+		"""
+		Create a new release and upload files to it.
+		Args:
+			name (str): The name of the release.
+			tag (str): The tag name of the release.
+			desc (str): Description of the release.
+			files (Sequence[str]): List of file paths to upload.
+		"""
+		data = dict(tag_name=tag, name=name, body=desc, draft=False, prerelease=False)
+		response = requests.post(self.url, headers=self.header, json=data)
+		
+		if response.status_code not in [200, 201]:
+			raise Exception(f"Failed to create release: {response.json()}")
+		
+		release_info = response.json()
+		upload_url = release_info["upload_url"].split("{?name,label}")[0]
+
+		# TODO: upload files
+		if len(files) == 0: return []
+
 class GitArchive:
 	GITHUB_API = "https://api.github.com"
 	DEFAULT_HEADER = {
@@ -274,6 +298,8 @@ class GitArchive:
 
 	def __init__(self, repo_path, root, token=None, max_threads=8, token_autosave=True, download_folder=None):
 		self.root = root
+		if not exists(self.root):
+			mkdir(self.root)
 		self.download_folder = GitArchive.DOWNLOAD_FOLDER_NAME if download_folder is None else download_folder
 		self.token_fn = join(self.root, GitArchive.TOKEN_FN)
 		self.repo_path = repo_path
@@ -381,7 +407,7 @@ class GitArchive:
 			batch_exe.start()
 			return [t.get_file() for t in dl_threads] 
 
-	def new_release(self, name: str, tag: str, desc: str, files: Sequence[str], non_blocking=False):
+	def new_release(self, name: str, tag: str, desc: str, files: Sequence[str]=[], non_blocking=False):
 		"""
 		Create a new release and upload files to it.
 		Args:
@@ -400,6 +426,7 @@ class GitArchive:
 		release_info = response.json()
 		upload_url = release_info["upload_url"].split("{?name,label}")[0]
 		
+		if len(files) == 0: return []
 		headers["Content-Type"] = "application/octet-stream"
 		params = dict(headers=headers, stream=True)
 		ul_threads = [Transfer(upload_url, file, params, ttype="upload") for file in files]
