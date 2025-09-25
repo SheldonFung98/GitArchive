@@ -323,12 +323,21 @@ class GitArchive:
 		return token
 
 	def _getReleases(self):
-		req = requests.get(self.url, headers=self.headers)
-		if req.status_code == 404:
-			raise RepoNotFoundError(self.repo_path)
-		elif req.status_code == 401:
-			raise RepoCredentialError(self.repo_path)
-		releases_df = pd.DataFrame(json.loads(req.content.decode("utf-8")))
+		page, per_page = 1, 100
+		releases_df = pd.DataFrame()
+		while True:
+			query = f"?per_page={per_page}&page={page}"
+			req = requests.get(self.url + query, headers=self.headers)
+			if req.status_code == 404:
+				raise RepoNotFoundError(self.repo_path)
+			elif req.status_code == 401:
+				raise RepoCredentialError(self.repo_path)
+			page_data = pd.DataFrame(json.loads(req.content.decode("utf-8")))
+			if page_data.empty:
+				break
+			releases_df = pd.concat([releases_df, page_data], ignore_index=True)
+			page += 1
+
 		if releases_df.empty:
 			return releases_df
 		releases_df['author'] = releases_df['author'].apply(lambda x: x['login'])
