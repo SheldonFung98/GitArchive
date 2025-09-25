@@ -111,7 +111,7 @@ class Transfer(Thread):
 	
 	def _download(self):
 		file_name = self.file.path().split("/")[-1]
-		response = requests.get(self.url, **self.params, timeout=5) # 5-second timeout
+		response = requests.get(self.url, **self.params, timeout=20) # 20-second timeout
 		total_length = int(response.headers.get('content-length'))
 		if not (self.file.exists() and total_length == len(self.file)):
 			self.file.write(response.iter_content(chunk_size=self.chunk_size), total_length)
@@ -122,7 +122,7 @@ class Transfer(Thread):
 		params = deepcopy(self.params)
 		params["data"] = self.file
 		url = f"{self.url}?name={file_name}"
-		upload_response = requests.post(url, **params, timeout=5)  # 5-second timeout
+		upload_response = requests.post(url, **params, timeout=20)  # 20-second timeout
 		if upload_response.status_code not in [200, 201]:
 			raise Exception(f"Failed to upload {file_name}: {upload_response.json()}")
 		self.done = True
